@@ -1,33 +1,70 @@
 package com.suntianyu.stm32smartdisinfectorjava.model.dto;
 
+import com.fasterxml.jackson.annotation.JsonAlias;
 import lombok.Data;
 
 @Data
 public class DeviceStatusReport {
+    @JsonAlias("t")
     private String type; // "status_report"
+
+    @JsonAlias("id")
     private String deviceId;
+
     private Long seq;
     private Long ts;
 
+    @JsonAlias("tp")
     private Double temperature;
+
+    @JsonAlias("hm")
     private Double humidity;
-    private boolean doorOpen;
-    private boolean machineRunning;
-    private boolean paused;
-    private String mode; // String to match JSON, map to enum later
 
-    private boolean heaterOn;
-    private boolean disinfectionOn;
-    private boolean fanOn;
+    @JsonAlias("d")
+    private Boolean doorOpen;
 
+    @JsonAlias("r")
+    private Boolean machineRunning;
+
+    @JsonAlias("p")
+    private Boolean paused;
+
+    @JsonAlias("m")
+    private String mode;
+
+    @JsonAlias("s")
+    private String systemStatus;
+
+    @JsonAlias("h")
+    private Boolean heaterOn;
+
+    @JsonAlias("u")
+    private Boolean disinfectionOn;
+
+    @JsonAlias("f")
+    private Boolean fanOn;
+
+    @JsonAlias("rs")
     private Integer remainingSeconds;
-    private Integer duration; // Optional but good to have
+
+    @JsonAlias("du")
+    private Integer duration;
+
+    @JsonAlias("fc")
     private Integer faultCode;
 
-    // Thresholds might be reported back
+    @JsonAlias("tl")
     private Double tempLow;
-    private Double tempHigh;
-    private Double humidityLow;
-    private Double humidityHigh;
-}
 
+    @JsonAlias("th")
+    private Double tempHigh;
+
+    @JsonAlias("hl")
+    private Double humidityLow;
+
+    @JsonAlias("hh")
+    private Double humidityHigh;
+
+    @JsonAlias("fw")
+    private String fwVersion;
+}

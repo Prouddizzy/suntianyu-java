@@ -3,8 +3,11 @@ package com.suntianyu.stm32smartdisinfectorjava.controller;
 import com.suntianyu.stm32smartdisinfectorjava.common.Result;
 import com.suntianyu.stm32smartdisinfectorjava.model.dto.*;
 import com.suntianyu.stm32smartdisinfectorjava.service.DeviceService;
+import com.suntianyu.stm32smartdisinfectorjava.service.DeviceStatusStreamService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 @RestController
 @RequestMapping("/api/v1/disinfector")
@@ -13,10 +16,18 @@ import org.springframework.web.bind.annotation.*;
 public class DisinfectorController {
 
     private final DeviceService deviceService;
+    private final DeviceStatusStreamService deviceStatusStreamService;
 
     @GetMapping("/runtime-status")
     public Result<RuntimeStatus> getRuntimeStatus() {
         return Result.success(deviceService.getRuntimeStatus());
+    }
+
+    @GetMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter streamStatus(@RequestParam(value = "deviceId", required = false) String deviceId) {
+        SseEmitter emitter = deviceStatusStreamService.subscribe(deviceId);
+        deviceStatusStreamService.sendSnapshot(emitter, deviceService.getRuntimeStatus());
+        return emitter;
     }
 
     @GetMapping("/config")

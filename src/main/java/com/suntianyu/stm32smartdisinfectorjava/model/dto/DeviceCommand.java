@@ -1,6 +1,7 @@
 package com.suntianyu.stm32smartdisinfectorjava.model.dto;
 
-import com.suntianyu.stm32smartdisinfectorjava.model.enums.DisinfectorMode;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -10,15 +11,35 @@ import lombok.NoArgsConstructor;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
+@JsonInclude(JsonInclude.Include.NON_NULL)
 public class DeviceCommand {
-    private String type; // "control_cmd"
+    @JsonProperty("t")
+    private String type;
+
+    @JsonProperty("c")
     private String cmdId;
+
+    @JsonProperty("id")
     private String deviceId;
-    private String action; // start, pause, stop
 
-    // For start command
-    private DisinfectorMode mode;
+    @JsonProperty("a")
+    private String action;
+
+    @JsonProperty("m")
+    private String mode;
+
+    @JsonProperty("du")
     private Integer duration;
-    private Thresholds thresholds;
-}
 
+    @JsonProperty("tl")
+    private Double tempLow;
+
+    @JsonProperty("th")
+    private Double tempHigh;
+
+    @JsonProperty("hl")
+    private Double humidityLow;
+
+    @JsonProperty("hh")
+    private Double humidityHigh;
+}

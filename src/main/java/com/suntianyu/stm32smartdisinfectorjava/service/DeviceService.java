@@ -1,7 +1,12 @@
 package com.suntianyu.stm32smartdisinfectorjava.service;
 
 import com.suntianyu.stm32smartdisinfectorjava.common.BusinessException;
-import com.suntianyu.stm32smartdisinfectorjava.model.dto.*;
+import com.suntianyu.stm32smartdisinfectorjava.model.dto.DeviceCommand;
+import com.suntianyu.stm32smartdisinfectorjava.model.dto.DeviceCommandAck;
+import com.suntianyu.stm32smartdisinfectorjava.model.dto.PauseRequest;
+import com.suntianyu.stm32smartdisinfectorjava.model.dto.RuntimeStatus;
+import com.suntianyu.stm32smartdisinfectorjava.model.dto.StartTaskRequest;
+import com.suntianyu.stm32smartdisinfectorjava.model.dto.Thresholds;
 import com.suntianyu.stm32smartdisinfectorjava.model.enums.DisinfectorMode;
 import com.suntianyu.stm32smartdisinfectorjava.repository.RedisStateRepository;
 import lombok.RequiredArgsConstructor;
@@ -9,8 +14,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
-import java.util.UUID;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Slf4j
 @Service
@@ -19,65 +23,61 @@ public class DeviceService {
 
     private final RedisStateRepository redisRepository;
     private final CommandService commandService;
+    private final DeviceStatusStreamService deviceStatusStreamService;
 
-    // Hardcoded for single device project, or could be passed from frontend
-    private static final String DEFAULT_DEVICE_ID = "cabinet-001";
+    private static final String DEFAULT_DEVICE_ID = "STM-001";
+    private static final int COMMAND_TIMEOUT_MS = 4000;
+    private static final int DEFAULT_DURATION_MINUTES = 20;
+    private static final double DEFAULT_TEMP_LOW = 18.0;
+    private static final double DEFAULT_TEMP_HIGH = 34.0;
+    private static final double DEFAULT_HUMIDITY_LOW = 45.0;
+    private static final double DEFAULT_HUMIDITY_HIGH = 65.0;
+    private static final AtomicInteger CMD_SEQ = new AtomicInteger(0);
 
     public RuntimeStatus getRuntimeStatus() {
         RuntimeStatus status = redisRepository.getStatus(DEFAULT_DEVICE_ID);
         if (status == null) {
-            // Return a default empty status if not connected yet
             status = new RuntimeStatus();
-            status.setMachineRunning(false);
-            status.setPaused(false);
-            status.setDoorOpen(false);
-            status.setSelectedMode(DisinfectorMode.SMART);
-            status.setDuration(20);
-            status.setRemainingSeconds(0);
-            status.setUpdatedAt(LocalDateTime.now());
-            // mock values
-            status.setTemperature(25.0);
-            status.setHumidity(50.0);
-            // Default threshold display
-            status.setTempLow(24.0);
-            status.setTempHigh(34.0);
-            status.setHumidityLow(45.0);
-            status.setHumidityHigh(65.0);
         }
-        return status;
+        return ensureStatusDefaults(status);
     }
 
     public Thresholds getConfig() {
         Thresholds config = redisRepository.getConfig(DEFAULT_DEVICE_ID);
         if (config == null) {
-            config = new Thresholds();
-            config.setTempLow(24.0);
-            config.setTempHigh(34.0);
-            config.setHumidityLow(45.0);
-            config.setHumidityHigh(65.0);
+            config = defaultThresholds();
         }
         return config;
     }
 
     public Thresholds updateThresholds(Thresholds thresholds) {
-        // Validate
-        if (thresholds.getTempLow() >= thresholds.getTempHigh() ||
-            thresholds.getHumidityLow() >= thresholds.getHumidityHigh()) {
-            throw new BusinessException(1005, "Threshold range illegal");
+        validateThresholds(thresholds);
+
+        DeviceCommand cmd = newCommand("thr");
+        applyThresholdsToCommand(cmd, thresholds);
+
+        try {
+            DeviceCommandAck ack = commandService.sendCommand(cmd, COMMAND_TIMEOUT_MS);
+            if (!ack.isOk()) {
+                throw new BusinessException(ack.getCode() != 0 ? ack.getCode() : 2002, ack.getMessage());
+            }
+        } catch (BusinessException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            log.error("Failed to update thresholds", e);
+            throw new BusinessException(2002, "Communication failed: " + e.getMessage());
         }
 
-        // Save to Redis
         redisRepository.saveConfig(DEFAULT_DEVICE_ID, thresholds);
-
-        // Spec says we just update configs.
-        // If we wanted to push to device on the fly, we would do it here.
-        // For now, we assume standard behavior: config is just config.
-
+        RuntimeStatus current = getRuntimeStatus();
+        applyThresholdsToStatus(current, thresholds);
+        current.setUpdatedAt(LocalDateTime.now());
+        redisRepository.saveStatus(DEFAULT_DEVICE_ID, current);
+        deviceStatusStreamService.publish(current);
         return thresholds;
     }
 
     public RuntimeStatus startTask(StartTaskRequest request) {
-        // 1. Pre-checks
         RuntimeStatus current = getRuntimeStatus();
         if (current.isDoorOpen()) {
             throw new BusinessException(1002, "Door is open");
@@ -85,53 +85,45 @@ public class DeviceService {
         if (current.isMachineRunning()) {
             throw new BusinessException(1003, "Device already running");
         }
-        // Check online status if enforced
-        // if (!redisRepository.isOnline(DEFAULT_DEVICE_ID)) {
-        //    throw new BusinessException(2001, "Device offline");
-        // }
+        if (request == null || request.getMode() == null) {
+            throw new BusinessException(1001, "Mode is required");
+        }
 
-        // 2. Build Command
-        DeviceCommand cmd = new DeviceCommand();
-        cmd.setType("control_cmd");
-        cmd.setCmdId(UUID.randomUUID().toString());
-        cmd.setDeviceId(DEFAULT_DEVICE_ID);
-        cmd.setAction("start");
-        cmd.setMode(request.getMode());
-        cmd.setDuration(request.getDuration());
-        cmd.setThresholds(request.getThresholds());
+        Integer duration = normalizeDuration(request);
+        Thresholds effectiveThresholds = request.getThresholds() != null ? request.getThresholds() : getConfig();
+        validateThresholds(effectiveThresholds);
 
-        // 3. Send & Wait for ACK
+        DeviceCommand cmd = newCommand("start");
+        cmd.setMode(request.getMode().toDeviceKey());
+        cmd.setDuration(duration);
+        applyThresholdsToCommand(cmd, effectiveThresholds);
+
         try {
-            DeviceCommandAck ack = commandService.sendCommand(cmd, 3000);
+            DeviceCommandAck ack = commandService.sendCommand(cmd, COMMAND_TIMEOUT_MS);
             if (!ack.isOk()) {
-                throw new BusinessException(ack.getCode() != 0 ? ack.getCode() : 2002, "Device refused start: " + ack.getMessage());
+                throw new BusinessException(ack.getCode() != 0 ? ack.getCode() : 2002, ack.getMessage());
             }
         } catch (BusinessException e) {
             throw e;
         } catch (RuntimeException e) {
-             log.error("Failed to start", e);
-             throw new BusinessException(2002, "Communication failed: " + e.getMessage());
+            log.error("Failed to start task", e);
+            throw new BusinessException(2002, "Communication failed: " + e.getMessage());
         }
 
-        // 4. Update local state immediately (optimistic)
         current.setMachineRunning(true);
+        current.setPaused(false);
+        current.setDoorOpen(false);
         current.setSelectedMode(request.getMode());
-        current.setDuration(request.getDuration());
-        if (request.getDuration() != null) {
-            current.setRemainingSeconds(request.getDuration() * 60);
-        } else {
-            current.setRemainingSeconds(0);
-        }
+        current.setSystemStatus("running");
+        current.setDuration(duration);
+        current.setRemainingSeconds(duration != null && duration > 0 ? duration * 60 : 0);
+        applyActuatorStateForMode(current, request.getMode(), false);
+        applyThresholdsToStatus(current, effectiveThresholds);
+        current.setUpdatedAt(LocalDateTime.now());
 
-        // Also update thresholds in runtime status locally
-        if (request.getThresholds() != null) {
-            current.setTempLow(request.getThresholds().getTempLow());
-            current.setTempHigh(request.getThresholds().getTempHigh());
-            current.setHumidityLow(request.getThresholds().getHumidityLow());
-            current.setHumidityHigh(request.getThresholds().getHumidityHigh());
-        }
+        redisRepository.saveConfig(DEFAULT_DEVICE_ID, effectiveThresholds);
         redisRepository.saveStatus(DEFAULT_DEVICE_ID, current);
-
+        deviceStatusStreamService.publish(current);
         return current;
     }
 
@@ -141,27 +133,37 @@ public class DeviceService {
             throw new BusinessException(1004, "Device is idle");
         }
 
-        boolean isPause = "pause".equalsIgnoreCase(request.getAction());
-        if (isPause && current.isPaused()) throw new BusinessException(1006, "Already paused");
-        if (!isPause && !current.isPaused()) throw new BusinessException(1006, "Already running");
+        String action = normalizePauseAction(request);
+        boolean isPause = "pause".equals(action);
+        if (isPause && current.isPaused()) {
+            throw new BusinessException(1006, "Already paused");
+        }
+        if (!isPause && !current.isPaused()) {
+            throw new BusinessException(1006, "Already running");
+        }
 
-        DeviceCommand cmd = new DeviceCommand();
-        cmd.setType("control_cmd");
-        cmd.setCmdId(UUID.randomUUID().toString());
-        cmd.setDeviceId(DEFAULT_DEVICE_ID);
-        cmd.setAction(request.getAction()); // pause or resume
-
+        DeviceCommand cmd = newCommand(action);
         try {
-            DeviceCommandAck ack = commandService.sendCommand(cmd, 3000);
-            if (!ack.isOk()) throw new BusinessException(ack.getCode() != 0 ? ack.getCode() : 2002, "Device refused " + request.getAction());
+            DeviceCommandAck ack = commandService.sendCommand(cmd, COMMAND_TIMEOUT_MS);
+            if (!ack.isOk()) {
+                throw new BusinessException(ack.getCode() != 0 ? ack.getCode() : 2002, ack.getMessage());
+            }
         } catch (BusinessException e) {
             throw e;
-        } catch (Exception e) {
-             throw new BusinessException(2002, "Communication failed");
+        } catch (RuntimeException e) {
+            throw new BusinessException(2002, "Communication failed: " + e.getMessage());
         }
 
         current.setPaused(isPause);
+        current.setSystemStatus(isPause ? "paused" : "running");
+        if (isPause) {
+            current.setHeaterOn(false);
+            current.setDisinfectionOn(false);
+            current.setFanOn(false);
+        }
+        current.setUpdatedAt(LocalDateTime.now());
         redisRepository.saveStatus(DEFAULT_DEVICE_ID, current);
+        deviceStatusStreamService.publish(current);
         return current;
     }
 
@@ -171,23 +173,168 @@ public class DeviceService {
             throw new BusinessException(1004, "Device is idle");
         }
 
-        DeviceCommand cmd = new DeviceCommand();
-        cmd.setType("control_cmd");
-        cmd.setCmdId(UUID.randomUUID().toString());
-        cmd.setDeviceId(DEFAULT_DEVICE_ID);
-        cmd.setAction("stop");
-
+        DeviceCommand cmd = newCommand("stop");
         try {
-            commandService.sendCommand(cmd, 3000);
-        } catch (Exception e) {
-            // Even if ack fails, we might still want to force stop locally?
-            // Better to throw error so user knows it might not have stopped on device.
-            throw new BusinessException(2002, "Communication failed");
+            DeviceCommandAck ack = commandService.sendCommand(cmd, COMMAND_TIMEOUT_MS);
+            if (!ack.isOk()) {
+                throw new BusinessException(ack.getCode() != 0 ? ack.getCode() : 2002, ack.getMessage());
+            }
+        } catch (BusinessException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new BusinessException(2002, "Communication failed: " + e.getMessage());
         }
 
         current.setMachineRunning(false);
         current.setPaused(false);
+        current.setSystemStatus("idle");
+        current.setRemainingSeconds(0);
+        current.setHeaterOn(false);
+        current.setDisinfectionOn(false);
+        current.setFanOn(false);
+        current.setUpdatedAt(LocalDateTime.now());
         redisRepository.saveStatus(DEFAULT_DEVICE_ID, current);
+        deviceStatusStreamService.publish(current);
         return current;
+    }
+
+    private RuntimeStatus ensureStatusDefaults(RuntimeStatus status) {
+        Thresholds config = getConfig();
+        status.setDeviceId(DEFAULT_DEVICE_ID);
+        status.setDeviceOnline(redisRepository.isOnline(DEFAULT_DEVICE_ID));
+        if (status.getLastSeenTs() == null && status.isDeviceOnline()) {
+            status.setLastSeenTs(System.currentTimeMillis());
+        }
+        if (status.getSelectedMode() == null) {
+            status.setSelectedMode(DisinfectorMode.SMART);
+        }
+        if (status.getDuration() == null) {
+            status.setDuration(DEFAULT_DURATION_MINUTES);
+        }
+        if (status.getRemainingSeconds() == null) {
+            status.setRemainingSeconds(0);
+        }
+        if (status.getTemperature() == null) {
+            status.setTemperature(25.0);
+        }
+        if (status.getHumidity() == null) {
+            status.setHumidity(50.0);
+        }
+        if (status.getTempLow() == null) {
+            status.setTempLow(config.getTempLow());
+        }
+        if (status.getTempHigh() == null) {
+            status.setTempHigh(config.getTempHigh());
+        }
+        if (status.getHumidityLow() == null) {
+            status.setHumidityLow(config.getHumidityLow());
+        }
+        if (status.getHumidityHigh() == null) {
+            status.setHumidityHigh(config.getHumidityHigh());
+        }
+        if (status.getSystemStatus() == null || status.getSystemStatus().isBlank()) {
+            if (status.isPaused()) {
+                status.setSystemStatus("paused");
+            } else if (status.isMachineRunning()) {
+                status.setSystemStatus("running");
+            } else {
+                status.setSystemStatus("idle");
+            }
+        }
+        if (status.getUpdatedAt() == null) {
+            status.setUpdatedAt(LocalDateTime.now());
+        }
+        return status;
+    }
+
+    private Thresholds defaultThresholds() {
+        Thresholds thresholds = new Thresholds();
+        thresholds.setTempLow(DEFAULT_TEMP_LOW);
+        thresholds.setTempHigh(DEFAULT_TEMP_HIGH);
+        thresholds.setHumidityLow(DEFAULT_HUMIDITY_LOW);
+        thresholds.setHumidityHigh(DEFAULT_HUMIDITY_HIGH);
+        return thresholds;
+    }
+
+    private void validateThresholds(Thresholds thresholds) {
+        if (thresholds == null) {
+            throw new BusinessException(1005, "Thresholds are required");
+        }
+        if (thresholds.getTempLow() == null || thresholds.getTempHigh() == null
+                || thresholds.getHumidityLow() == null || thresholds.getHumidityHigh() == null) {
+            throw new BusinessException(1005, "Threshold range incomplete");
+        }
+        if (thresholds.getTempLow() >= thresholds.getTempHigh()
+                || thresholds.getHumidityLow() >= thresholds.getHumidityHigh()) {
+            throw new BusinessException(1005, "Threshold range illegal");
+        }
+    }
+
+    private Integer normalizeDuration(StartTaskRequest request) {
+        if (request.getMode() == DisinfectorMode.SMART) {
+            return 0;
+        }
+        if (request.getDuration() == null || request.getDuration() <= 0) {
+            throw new BusinessException(1001, "Duration is required");
+        }
+        return request.getDuration();
+    }
+
+    private String normalizePauseAction(PauseRequest request) {
+        if (request == null || request.getAction() == null || request.getAction().isBlank()) {
+            return "pause";
+        }
+        String action = request.getAction().trim().toLowerCase();
+        if (!"pause".equals(action) && !"resume".equals(action)) {
+            throw new BusinessException(1001, "Invalid pause action");
+        }
+        return action;
+    }
+
+    private DeviceCommand newCommand(String action) {
+        DeviceCommand cmd = new DeviceCommand();
+        cmd.setType("cmd");
+        cmd.setCmdId(nextCmdId());
+        cmd.setDeviceId(DEFAULT_DEVICE_ID);
+        cmd.setAction(action);
+        return cmd;
+    }
+
+    private String nextCmdId() {
+        int next = CMD_SEQ.updateAndGet(value -> (value + 1) & 0xFFFF);
+        return String.format("C%03X", next & 0xFFF);
+    }
+
+    private void applyThresholdsToCommand(DeviceCommand cmd, Thresholds thresholds) {
+        if (thresholds == null) {
+            return;
+        }
+        cmd.setTempLow(thresholds.getTempLow());
+        cmd.setTempHigh(thresholds.getTempHigh());
+        cmd.setHumidityLow(thresholds.getHumidityLow());
+        cmd.setHumidityHigh(thresholds.getHumidityHigh());
+    }
+
+    private void applyThresholdsToStatus(RuntimeStatus status, Thresholds thresholds) {
+        if (thresholds == null) {
+            return;
+        }
+        status.setTempLow(thresholds.getTempLow());
+        status.setTempHigh(thresholds.getTempHigh());
+        status.setHumidityLow(thresholds.getHumidityLow());
+        status.setHumidityHigh(thresholds.getHumidityHigh());
+    }
+
+    private void applyActuatorStateForMode(RuntimeStatus status, DisinfectorMode mode, boolean paused) {
+        if (paused) {
+            status.setHeaterOn(false);
+            status.setDisinfectionOn(false);
+            status.setFanOn(false);
+            return;
+        }
+
+        status.setHeaterOn(mode == DisinfectorMode.HEATING);
+        status.setDisinfectionOn(mode == DisinfectorMode.DISINFECTION);
+        status.setFanOn(mode == DisinfectorMode.FAN);
     }
 }

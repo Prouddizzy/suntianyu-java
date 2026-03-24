@@ -4,6 +4,7 @@ import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.ChannelOption;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
@@ -19,6 +20,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @Component
@@ -27,6 +29,9 @@ public class TcpServerBootstrap {
 
     @Value("${app.device.tcp-port:9000}")
     private int port;
+
+    @Value("${app.device.offline-timeout-ms:30000}")
+    private long offlineTimeoutMs;
 
     private final DeviceMessageHandler deviceMessageHandler;
 
@@ -43,13 +48,15 @@ public class TcpServerBootstrap {
                 ServerBootstrap b = new ServerBootstrap();
                 b.group(bossGroup, workerGroup)
                         .channel(NioServerSocketChannel.class)
+                        .childOption(ChannelOption.TCP_NODELAY, true)
+                        .childOption(ChannelOption.SO_KEEPALIVE, true)
                         .childHandler(new ChannelInitializer<SocketChannel>() {
                             @Override
                             public void initChannel(SocketChannel ch) {
                                 ch.pipeline().addLast(new LineBasedFrameDecoder(1024));
                                 ch.pipeline().addLast(new StringDecoder(StandardCharsets.UTF_8));
                                 ch.pipeline().addLast(new StringEncoder(StandardCharsets.UTF_8));
-                                ch.pipeline().addLast(new IdleStateHandler(30, 0, 0)); // 30s read idle
+                                ch.pipeline().addLast(new IdleStateHandler(offlineTimeoutMs, 0, 0, TimeUnit.MILLISECONDS));
                                 ch.pipeline().addLast(deviceMessageHandler);
                             }
                         });
