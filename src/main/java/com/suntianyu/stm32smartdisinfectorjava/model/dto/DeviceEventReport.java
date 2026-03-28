@@ -26,6 +26,9 @@ public class DeviceEventReport {
     @JsonAlias("m")
     private String mode;
 
+    @JsonAlias("sg")
+    private String stage;
+
     @JsonAlias("tp")
     private Double temperature;
 

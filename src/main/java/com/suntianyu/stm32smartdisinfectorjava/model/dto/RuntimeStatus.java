@@ -27,6 +27,7 @@ public class RuntimeStatus {
     private Double humidityHigh;
     private Integer faultCode;
     private String systemStatus;
+    private String stage;
     private String fwVersion;
     private String lastEventCode;
     private String lastEventMessage;

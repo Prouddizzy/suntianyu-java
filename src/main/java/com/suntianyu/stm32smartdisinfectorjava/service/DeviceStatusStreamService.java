@@ -7,6 +7,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
+import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -27,12 +28,12 @@ public class DeviceStatusStreamService {
 
         emitter.onCompletion(() -> removeEmitter(resolvedDeviceId, emitter));
         emitter.onTimeout(() -> {
-            removeEmitter(resolvedDeviceId, emitter);
-            emitter.complete();
+            log.debug("SSE stream timed out, deviceId={}", resolvedDeviceId);
+            completeEmitter(resolvedDeviceId, emitter);
         });
         emitter.onError(ex -> {
-            removeEmitter(resolvedDeviceId, emitter);
-            emitter.completeWithError(ex);
+            logEmitterIssue(resolvedDeviceId, ex, "stream callback");
+            completeEmitter(resolvedDeviceId, emitter);
         });
 
         return emitter;
@@ -43,11 +44,11 @@ public class DeviceStatusStreamService {
             return;
         }
 
+        String deviceId = hasText(status.getDeviceId()) ? status.getDeviceId() : DEFAULT_DEVICE_ID;
         try {
-            emitter.send(SseEmitter.event().name("status").data(status));
-        } catch (IOException e) {
-            log.warn("Failed to send initial SSE snapshot", e);
-            emitter.completeWithError(e);
+            emitter.send(SseEmitter.event().data(status));
+        } catch (IOException | IllegalStateException e) {
+            handleEmitterFailure(deviceId, emitter, e, "initial snapshot");
         }
     }
 
@@ -63,10 +64,9 @@ public class DeviceStatusStreamService {
 
         for (SseEmitter emitter : subscribers) {
             try {
-                emitter.send(SseEmitter.event().name("status").data(status));
-            } catch (IOException e) {
-                removeEmitter(status.getDeviceId(), emitter);
-                emitter.completeWithError(e);
+                emitter.send(SseEmitter.event().data(status));
+            } catch (IOException | IllegalStateException e) {
+                handleEmitterFailure(status.getDeviceId(), emitter, e, "status publish");
             }
         }
     }
@@ -77,12 +77,33 @@ public class DeviceStatusStreamService {
             for (SseEmitter emitter : subscribers) {
                 try {
                     emitter.send(SseEmitter.event().name("ping").data("ok"));
-                } catch (IOException e) {
-                    removeEmitter(deviceId, emitter);
-                    emitter.completeWithError(e);
+                } catch (IOException | IllegalStateException e) {
+                    handleEmitterFailure(deviceId, emitter, e, "heartbeat");
                 }
             }
         });
+    }
+
+    private void handleEmitterFailure(String deviceId, SseEmitter emitter, Exception exception, String action) {
+        logEmitterIssue(deviceId, exception, action);
+        completeEmitter(deviceId, emitter);
+    }
+
+    private void completeEmitter(String deviceId, SseEmitter emitter) {
+        removeEmitter(deviceId, emitter);
+        try {
+            emitter.complete();
+        } catch (IllegalStateException ignored) {
+            // The emitter may already be completed by the container thread.
+        }
+    }
+
+    private void logEmitterIssue(String deviceId, Throwable throwable, String action) {
+        if (isClientDisconnect(throwable)) {
+            log.debug("SSE client disconnected during {}, deviceId={}", action, deviceId);
+            return;
+        }
+        log.warn("Failed during SSE {}, deviceId={}", action, deviceId, throwable);
     }
 
     private void removeEmitter(String deviceId, SseEmitter emitter) {
@@ -99,5 +120,34 @@ public class DeviceStatusStreamService {
 
     private boolean hasText(String value) {
         return value != null && !value.isBlank();
+    }
+
+    private boolean isClientDisconnect(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            String className = current.getClass().getName();
+            if (className.endsWith("AsyncRequestNotUsableException")
+                    || className.contains("ClientAbortException")) {
+                return true;
+            }
+
+            if (hasDisconnectMessage(current.getMessage())) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private boolean hasDisconnectMessage(String message) {
+        if (!hasText(message)) {
+            return false;
+        }
+
+        String normalized = message.toLowerCase(Locale.ROOT);
+        return normalized.contains("broken pipe")
+                || normalized.contains("connection reset by peer")
+                || normalized.contains("forcibly closed by the remote host")
+                || normalized.contains("established connection was aborted");
     }
 }

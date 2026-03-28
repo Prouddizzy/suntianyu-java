@@ -7,13 +7,16 @@ import com.suntianyu.stm32smartdisinfectorjava.model.dto.PauseRequest;
 import com.suntianyu.stm32smartdisinfectorjava.model.dto.RuntimeStatus;
 import com.suntianyu.stm32smartdisinfectorjava.model.dto.StartTaskRequest;
 import com.suntianyu.stm32smartdisinfectorjava.model.dto.Thresholds;
+import com.suntianyu.stm32smartdisinfectorjava.model.dto.WifiConfigRequest;
+import com.suntianyu.stm32smartdisinfectorjava.model.dto.WifiConfigResponse;
 import com.suntianyu.stm32smartdisinfectorjava.model.enums.DisinfectorMode;
-import com.suntianyu.stm32smartdisinfectorjava.repository.RedisStateRepository;
+import com.suntianyu.stm32smartdisinfectorjava.repository.InMemoryStateRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 @Slf4j
@@ -21,7 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 @RequiredArgsConstructor
 public class DeviceService {
 
-    private final RedisStateRepository redisRepository;
+    private final InMemoryStateRepository stateRepository;
     private final CommandService commandService;
     private final DeviceStatusStreamService deviceStatusStreamService;
 
@@ -35,15 +38,38 @@ public class DeviceService {
     private static final AtomicInteger CMD_SEQ = new AtomicInteger(0);
 
     public RuntimeStatus getRuntimeStatus() {
-        RuntimeStatus status = redisRepository.getStatus(DEFAULT_DEVICE_ID);
+        return getRuntimeStatus(null);
+    }
+
+    public RuntimeStatus getRuntimeStatus(String deviceId) {
+        String resolvedDeviceId = resolveDeviceId(deviceId);
+        RuntimeStatus status = stateRepository.getStatus(resolvedDeviceId);
         if (status == null) {
             status = new RuntimeStatus();
         }
-        return ensureStatusDefaults(status);
+        return ensureStatusDefaults(resolvedDeviceId, status);
+    }
+
+    public List<RuntimeStatus> getRecentRuntimeStatuses(Integer limit) {
+        return getRecentRuntimeStatuses(null, limit);
+    }
+
+    public List<RuntimeStatus> getRecentRuntimeStatuses(String deviceId, Integer limit) {
+        String resolvedDeviceId = resolveDeviceId(deviceId);
+        int resolvedLimit = limit == null ? 10 : limit;
+        return stateRepository.getRecentStatuses(resolvedDeviceId, resolvedLimit)
+                .stream()
+                .map(status -> ensureStatusDefaults(resolvedDeviceId, status))
+                .toList();
     }
 
     public Thresholds getConfig() {
-        Thresholds config = redisRepository.getConfig(DEFAULT_DEVICE_ID);
+        return getConfig(null);
+    }
+
+    public Thresholds getConfig(String deviceId) {
+        String resolvedDeviceId = resolveDeviceId(deviceId);
+        Thresholds config = stateRepository.getConfig(resolvedDeviceId);
         if (config == null) {
             config = defaultThresholds();
         }
@@ -51,9 +77,14 @@ public class DeviceService {
     }
 
     public Thresholds updateThresholds(Thresholds thresholds) {
+        return updateThresholds(null, thresholds);
+    }
+
+    public Thresholds updateThresholds(String deviceId, Thresholds thresholds) {
+        String resolvedDeviceId = resolveDeviceId(deviceId);
         validateThresholds(thresholds);
 
-        DeviceCommand cmd = newCommand("thr");
+        DeviceCommand cmd = newCommand(resolvedDeviceId, "thr");
         applyThresholdsToCommand(cmd, thresholds);
 
         try {
@@ -68,17 +99,22 @@ public class DeviceService {
             throw new BusinessException(2002, "Communication failed: " + e.getMessage());
         }
 
-        redisRepository.saveConfig(DEFAULT_DEVICE_ID, thresholds);
-        RuntimeStatus current = getRuntimeStatus();
+        stateRepository.saveConfig(resolvedDeviceId, thresholds);
+        RuntimeStatus current = getRuntimeStatus(resolvedDeviceId);
         applyThresholdsToStatus(current, thresholds);
         current.setUpdatedAt(LocalDateTime.now());
-        redisRepository.saveStatus(DEFAULT_DEVICE_ID, current);
+        stateRepository.saveStatus(resolvedDeviceId, current);
         deviceStatusStreamService.publish(current);
         return thresholds;
     }
 
     public RuntimeStatus startTask(StartTaskRequest request) {
-        RuntimeStatus current = getRuntimeStatus();
+        return startTask(null, request);
+    }
+
+    public RuntimeStatus startTask(String deviceId, StartTaskRequest request) {
+        String resolvedDeviceId = resolveDeviceId(deviceId);
+        RuntimeStatus current = getRuntimeStatus(resolvedDeviceId);
         if (current.isDoorOpen()) {
             throw new BusinessException(1002, "Door is open");
         }
@@ -90,10 +126,12 @@ public class DeviceService {
         }
 
         Integer duration = normalizeDuration(request);
-        Thresholds effectiveThresholds = request.getThresholds() != null ? request.getThresholds() : getConfig();
+        Thresholds effectiveThresholds = request.getThresholds() != null
+                ? request.getThresholds()
+                : getConfig(resolvedDeviceId);
         validateThresholds(effectiveThresholds);
 
-        DeviceCommand cmd = newCommand("start");
+        DeviceCommand cmd = newCommand(resolvedDeviceId, "start");
         cmd.setMode(request.getMode().toDeviceKey());
         cmd.setDuration(duration);
         applyThresholdsToCommand(cmd, effectiveThresholds);
@@ -121,14 +159,19 @@ public class DeviceService {
         applyThresholdsToStatus(current, effectiveThresholds);
         current.setUpdatedAt(LocalDateTime.now());
 
-        redisRepository.saveConfig(DEFAULT_DEVICE_ID, effectiveThresholds);
-        redisRepository.saveStatus(DEFAULT_DEVICE_ID, current);
+        stateRepository.saveConfig(resolvedDeviceId, effectiveThresholds);
+        stateRepository.saveStatus(resolvedDeviceId, current);
         deviceStatusStreamService.publish(current);
         return current;
     }
 
     public RuntimeStatus pauseTask(PauseRequest request) {
-        RuntimeStatus current = getRuntimeStatus();
+        return pauseTask(null, request);
+    }
+
+    public RuntimeStatus pauseTask(String deviceId, PauseRequest request) {
+        String resolvedDeviceId = resolveDeviceId(deviceId);
+        RuntimeStatus current = getRuntimeStatus(resolvedDeviceId);
         if (!current.isMachineRunning()) {
             throw new BusinessException(1004, "Device is idle");
         }
@@ -142,7 +185,7 @@ public class DeviceService {
             throw new BusinessException(1006, "Already running");
         }
 
-        DeviceCommand cmd = newCommand(action);
+        DeviceCommand cmd = newCommand(resolvedDeviceId, action);
         try {
             DeviceCommandAck ack = commandService.sendCommand(cmd, COMMAND_TIMEOUT_MS);
             if (!ack.isOk()) {
@@ -162,18 +205,23 @@ public class DeviceService {
             current.setFanOn(false);
         }
         current.setUpdatedAt(LocalDateTime.now());
-        redisRepository.saveStatus(DEFAULT_DEVICE_ID, current);
+        stateRepository.saveStatus(resolvedDeviceId, current);
         deviceStatusStreamService.publish(current);
         return current;
     }
 
     public RuntimeStatus stopTask() {
-        RuntimeStatus current = getRuntimeStatus();
+        return stopTask(null);
+    }
+
+    public RuntimeStatus stopTask(String deviceId) {
+        String resolvedDeviceId = resolveDeviceId(deviceId);
+        RuntimeStatus current = getRuntimeStatus(resolvedDeviceId);
         if (!current.isMachineRunning()) {
             throw new BusinessException(1004, "Device is idle");
         }
 
-        DeviceCommand cmd = newCommand("stop");
+        DeviceCommand cmd = newCommand(resolvedDeviceId, "stop");
         try {
             DeviceCommandAck ack = commandService.sendCommand(cmd, COMMAND_TIMEOUT_MS);
             if (!ack.isOk()) {
@@ -193,15 +241,38 @@ public class DeviceService {
         current.setDisinfectionOn(false);
         current.setFanOn(false);
         current.setUpdatedAt(LocalDateTime.now());
-        redisRepository.saveStatus(DEFAULT_DEVICE_ID, current);
+        stateRepository.saveStatus(resolvedDeviceId, current);
         deviceStatusStreamService.publish(current);
         return current;
     }
 
-    private RuntimeStatus ensureStatusDefaults(RuntimeStatus status) {
-        Thresholds config = getConfig();
-        status.setDeviceId(DEFAULT_DEVICE_ID);
-        status.setDeviceOnline(redisRepository.isOnline(DEFAULT_DEVICE_ID));
+    public WifiConfigResponse updateWifiConfig(String deviceId, WifiConfigRequest request) {
+        String resolvedDeviceId = resolveDeviceId(deviceId);
+        WifiConfigRequest sanitizedRequest = sanitizeWifiConfig(request);
+
+        DeviceCommand cmd = newCommand(resolvedDeviceId, "wifi");
+        cmd.setWifiSsid(sanitizedRequest.getSsid());
+        cmd.setWifiPassword(sanitizedRequest.getPassword());
+
+        try {
+            DeviceCommandAck ack = commandService.sendCommand(cmd, COMMAND_TIMEOUT_MS);
+            if (!ack.isOk()) {
+                throw new BusinessException(ack.getCode() != 0 ? ack.getCode() : 2002, ack.getMessage());
+            }
+        } catch (BusinessException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            log.error("Failed to update wifi config for device {}", resolvedDeviceId, e);
+            throw new BusinessException(2002, "Communication failed: " + e.getMessage());
+        }
+
+        return new WifiConfigResponse(resolvedDeviceId, sanitizedRequest.getSsid(), true);
+    }
+
+    private RuntimeStatus ensureStatusDefaults(String deviceId, RuntimeStatus status) {
+        Thresholds config = getConfig(deviceId);
+        status.setDeviceId(deviceId);
+        status.setDeviceOnline(stateRepository.isOnline(deviceId));
         if (status.getLastSeenTs() == null && status.isDeviceOnline()) {
             status.setLastSeenTs(System.currentTimeMillis());
         }
@@ -291,11 +362,11 @@ public class DeviceService {
         return action;
     }
 
-    private DeviceCommand newCommand(String action) {
+    private DeviceCommand newCommand(String deviceId, String action) {
         DeviceCommand cmd = new DeviceCommand();
         cmd.setType("cmd");
         cmd.setCmdId(nextCmdId());
-        cmd.setDeviceId(DEFAULT_DEVICE_ID);
+        cmd.setDeviceId(resolveDeviceId(deviceId));
         cmd.setAction(action);
         return cmd;
     }
@@ -336,5 +407,33 @@ public class DeviceService {
         status.setHeaterOn(mode == DisinfectorMode.HEATING);
         status.setDisinfectionOn(mode == DisinfectorMode.DISINFECTION);
         status.setFanOn(mode == DisinfectorMode.FAN);
+    }
+
+    private WifiConfigRequest sanitizeWifiConfig(WifiConfigRequest request) {
+        if (request == null) {
+            throw new BusinessException(1001, "WiFi config is required");
+        }
+
+        String ssid = request.getSsid() == null ? "" : request.getSsid().trim();
+        String password = request.getPassword() == null ? "" : request.getPassword().trim();
+
+        if (ssid.isEmpty()) {
+            throw new BusinessException(1001, "WiFi SSID is required");
+        }
+        if (ssid.length() > 32) {
+            throw new BusinessException(1001, "WiFi SSID too long");
+        }
+        if (password.length() < 8 || password.length() > 64) {
+            throw new BusinessException(1001, "WiFi password length invalid");
+        }
+
+        WifiConfigRequest sanitized = new WifiConfigRequest();
+        sanitized.setSsid(ssid);
+        sanitized.setPassword(password);
+        return sanitized;
+    }
+
+    private String resolveDeviceId(String deviceId) {
+        return deviceId == null || deviceId.isBlank() ? DEFAULT_DEVICE_ID : deviceId.trim();
     }
 }

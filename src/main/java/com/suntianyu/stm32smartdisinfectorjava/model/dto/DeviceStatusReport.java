@@ -35,6 +35,9 @@ public class DeviceStatusReport {
     @JsonAlias("s")
     private String systemStatus;
 
+    @JsonAlias("sg")
+    private String stage;
+
     @JsonAlias("h")
     private Boolean heaterOn;
 

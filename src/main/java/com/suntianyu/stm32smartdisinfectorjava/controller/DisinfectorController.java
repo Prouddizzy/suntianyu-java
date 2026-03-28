@@ -9,6 +9,8 @@ import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.util.List;
+
 @RestController
 @RequestMapping("/api/v1/disinfector")
 @RequiredArgsConstructor
@@ -19,40 +21,63 @@ public class DisinfectorController {
     private final DeviceStatusStreamService deviceStatusStreamService;
 
     @GetMapping("/runtime-status")
-    public Result<RuntimeStatus> getRuntimeStatus() {
-        return Result.success(deviceService.getRuntimeStatus());
+    public Result<RuntimeStatus> getRuntimeStatus(
+            @RequestParam(value = "deviceId", required = false) String deviceId) {
+        return Result.success(deviceService.getRuntimeStatus(deviceId));
+    }
+
+    @GetMapping("/runtime-status/recent")
+    public Result<List<RuntimeStatus>> getRecentRuntimeStatuses(
+            @RequestParam(value = "deviceId", required = false) String deviceId,
+            @RequestParam(value = "limit", required = false, defaultValue = "10") Integer limit) {
+        return Result.success(deviceService.getRecentRuntimeStatuses(deviceId, limit));
     }
 
     @GetMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter streamStatus(@RequestParam(value = "deviceId", required = false) String deviceId) {
         SseEmitter emitter = deviceStatusStreamService.subscribe(deviceId);
-        deviceStatusStreamService.sendSnapshot(emitter, deviceService.getRuntimeStatus());
+        deviceStatusStreamService.sendSnapshot(emitter, deviceService.getRuntimeStatus(deviceId));
         return emitter;
     }
 
     @GetMapping("/config")
-    public Result<Thresholds> getConfig() {
-        return Result.success(deviceService.getConfig());
+    public Result<Thresholds> getConfig(
+            @RequestParam(value = "deviceId", required = false) String deviceId) {
+        return Result.success(deviceService.getConfig(deviceId));
     }
 
     @PutMapping("/thresholds")
-    public Result<Thresholds> updateThresholds(@RequestBody Thresholds thresholds) {
-        return Result.success(deviceService.updateThresholds(thresholds));
+    public Result<Thresholds> updateThresholds(
+            @RequestParam(value = "deviceId", required = false) String deviceId,
+            @RequestBody Thresholds thresholds) {
+        return Result.success(deviceService.updateThresholds(deviceId, thresholds));
+    }
+
+    @PutMapping("/wifi-config")
+    public Result<WifiConfigResponse> updateWifiConfig(
+            @RequestParam(value = "deviceId", required = false) String deviceId,
+            @RequestBody WifiConfigRequest request) {
+        return Result.success(deviceService.updateWifiConfig(deviceId, request));
     }
 
     @PostMapping("/tasks/start")
-    public Result<RuntimeStatus> startTask(@RequestBody StartTaskRequest request) {
-        return Result.success(deviceService.startTask(request));
+    public Result<RuntimeStatus> startTask(
+            @RequestParam(value = "deviceId", required = false) String deviceId,
+            @RequestBody StartTaskRequest request) {
+        return Result.success(deviceService.startTask(deviceId, request));
     }
 
     @PostMapping("/tasks/pause")
-    public Result<RuntimeStatus> pauseTask(@RequestBody PauseRequest request) {
-        return Result.success(deviceService.pauseTask(request));
+    public Result<RuntimeStatus> pauseTask(
+            @RequestParam(value = "deviceId", required = false) String deviceId,
+            @RequestBody PauseRequest request) {
+        return Result.success(deviceService.pauseTask(deviceId, request));
     }
 
     @PostMapping("/tasks/stop")
-    public Result<RuntimeStatus> stopTask() {
-        return Result.success(deviceService.stopTask());
+    public Result<RuntimeStatus> stopTask(
+            @RequestParam(value = "deviceId", required = false) String deviceId) {
+        return Result.success(deviceService.stopTask(deviceId));
     }
 }
 

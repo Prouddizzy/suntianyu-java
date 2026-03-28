@@ -30,7 +30,7 @@ public class TcpServerBootstrap {
     @Value("${app.device.tcp-port:9000}")
     private int port;
 
-    @Value("${app.device.offline-timeout-ms:30000}")
+    @Value("${app.device.offline-timeout-ms:45000}")
     private long offlineTimeoutMs;
 
     private final DeviceMessageHandler deviceMessageHandler;

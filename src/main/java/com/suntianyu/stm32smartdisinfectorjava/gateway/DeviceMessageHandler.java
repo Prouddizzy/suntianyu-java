@@ -9,7 +9,7 @@ import com.suntianyu.stm32smartdisinfectorjava.model.dto.DeviceStatusReport;
 import com.suntianyu.stm32smartdisinfectorjava.model.dto.RuntimeStatus;
 import com.suntianyu.stm32smartdisinfectorjava.model.dto.Thresholds;
 import com.suntianyu.stm32smartdisinfectorjava.model.enums.DisinfectorMode;
-import com.suntianyu.stm32smartdisinfectorjava.repository.RedisStateRepository;
+import com.suntianyu.stm32smartdisinfectorjava.repository.InMemoryStateRepository;
 import com.suntianyu.stm32smartdisinfectorjava.service.CommandService;
 import com.suntianyu.stm32smartdisinfectorjava.service.DeviceStatusStreamService;
 import io.netty.channel.ChannelHandlerContext;
@@ -30,7 +30,7 @@ public class DeviceMessageHandler extends SimpleChannelInboundHandler<String> {
 
     private final ObjectMapper objectMapper;
     private final DeviceChannelRegistry channelRegistry;
-    private final RedisStateRepository redisRepository;
+    private final InMemoryStateRepository stateRepository;
     private final CommandService commandService;
     private final DeviceStatusStreamService deviceStatusStreamService;
 
@@ -48,7 +48,7 @@ public class DeviceMessageHandler extends SimpleChannelInboundHandler<String> {
         if (status != null) {
             status.setDeviceOnline(false);
             status.setUpdatedAt(LocalDateTime.now());
-            redisRepository.saveStatus(status.getDeviceId(), status);
+            stateRepository.saveStatus(status.getDeviceId(), status);
             deviceStatusStreamService.publish(status);
         }
         channelRegistry.removeChannel(ctx.channel());
@@ -88,7 +88,7 @@ public class DeviceMessageHandler extends SimpleChannelInboundHandler<String> {
 
             if (!"unknown".equals(deviceId)) {
                 channelRegistry.register(deviceId, ctx.channel());
-                redisRepository.updateLastSeen(deviceId);
+                stateRepository.updateLastSeen(deviceId);
             }
 
             switch (type) {
@@ -117,6 +117,7 @@ public class DeviceMessageHandler extends SimpleChannelInboundHandler<String> {
                 status,
                 report.getMode(),
                 report.getSystemStatus(),
+                report.getStage(),
                 report.getTemperature(),
                 report.getHumidity(),
                 report.getDoorOpen(),
@@ -142,10 +143,10 @@ public class DeviceMessageHandler extends SimpleChannelInboundHandler<String> {
                 report.getHumidityHigh()
         );
         if (thresholds != null) {
-            redisRepository.saveConfig(deviceId, thresholds);
+            stateRepository.saveConfig(deviceId, thresholds);
         }
 
-        redisRepository.saveStatus(deviceId, status);
+        stateRepository.saveStatus(deviceId, status);
         deviceStatusStreamService.publish(status);
     }
 
@@ -157,6 +158,7 @@ public class DeviceMessageHandler extends SimpleChannelInboundHandler<String> {
                 status,
                 report.getMode(),
                 report.getSystemStatus(),
+                report.getStage(),
                 report.getTemperature(),
                 report.getHumidity(),
                 report.getDoorOpen(),
@@ -182,10 +184,10 @@ public class DeviceMessageHandler extends SimpleChannelInboundHandler<String> {
                 report.getHumidityHigh()
         );
         if (thresholds != null) {
-            redisRepository.saveConfig(deviceId, thresholds);
+            stateRepository.saveConfig(deviceId, thresholds);
         }
 
-        redisRepository.saveStatus(deviceId, status);
+        stateRepository.saveStatus(deviceId, status);
         deviceStatusStreamService.publish(status);
     }
 
@@ -197,6 +199,7 @@ public class DeviceMessageHandler extends SimpleChannelInboundHandler<String> {
                 status,
                 report.getMode(),
                 report.getSystemStatus(),
+                report.getStage(),
                 report.getTemperature(),
                 report.getHumidity(),
                 report.getDoorOpen(),
@@ -232,10 +235,10 @@ public class DeviceMessageHandler extends SimpleChannelInboundHandler<String> {
                 report.getHumidityHigh()
         );
         if (thresholds != null) {
-            redisRepository.saveConfig(deviceId, thresholds);
+            stateRepository.saveConfig(deviceId, thresholds);
         }
 
-        redisRepository.saveStatus(deviceId, status);
+        stateRepository.saveStatus(deviceId, status);
         deviceStatusStreamService.publish(status);
     }
 
@@ -245,7 +248,7 @@ public class DeviceMessageHandler extends SimpleChannelInboundHandler<String> {
     }
 
     private RuntimeStatus loadStatus(String deviceId) {
-        RuntimeStatus status = redisRepository.getStatus(deviceId);
+        RuntimeStatus status = stateRepository.getStatus(deviceId);
         if (status == null) {
             status = new RuntimeStatus();
             status.setSelectedMode(DisinfectorMode.SMART);
@@ -261,6 +264,7 @@ public class DeviceMessageHandler extends SimpleChannelInboundHandler<String> {
     private void mergeSnapshot(RuntimeStatus status,
                                String modeValue,
                                String systemStatus,
+                               String stage,
                                Double temperature,
                                Double humidity,
                                Boolean doorOpen,
@@ -285,6 +289,9 @@ public class DeviceMessageHandler extends SimpleChannelInboundHandler<String> {
         String normalizedStatus = normalizeSystemStatus(systemStatus);
         if (hasText(normalizedStatus)) {
             status.setSystemStatus(normalizedStatus);
+        }
+        if (hasText(stage)) {
+            status.setStage(stage);
         }
         if (temperature != null) {
             status.setTemperature(temperature);

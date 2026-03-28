@@ -233,3 +233,60 @@ spring:
 - 严格实现门开保护、模式规则、暂停继续、错误码
 请输出可运行代码、配置文件、关键单元测试和集成测试样例。
 ```
+## 16. 当前实现补充（2026-03）
+
+### 16.1 设备参数透传
+
+- `/runtime-status`
+- `/runtime-status/recent`
+- `/config`
+- `/thresholds`
+- `/tasks/start`
+- `/tasks/pause`
+- `/tasks/stop`
+- `/stream`
+
+以上接口都支持可选 `deviceId` 查询参数，未传时默认 `STM-001`。
+
+### 16.2 WiFi 配置接口
+
+新增：
+
+```http
+PUT /api/v1/disinfector/wifi-config?deviceId=STM-001
+```
+
+请求体：
+
+```json
+{
+  "ssid": "LabWiFi",
+  "password": "12345678"
+}
+```
+
+下发到设备的命令格式：
+
+```json
+{"t":"cmd","c":"C002","id":"STM-001","a":"wifi","ws":"LabWiFi","wp":"12345678"}
+```
+
+返回：
+
+```json
+{
+  "code": 0,
+  "message": "ok",
+  "data": {
+    "deviceId": "STM-001",
+    "ssid": "LabWiFi",
+    "appliedAfterRestart": true
+  }
+}
+```
+
+### 16.3 设备侧生效时机
+
+- 后端收到 ACK 即认为“已成功保存到设备”
+- 新 WiFi 仅在设备重启后生效
+- 当前连接不断开，不强制立即切换网络

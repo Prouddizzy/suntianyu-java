@@ -42,4 +42,10 @@ public class DeviceCommand {
 
     @JsonProperty("hh")
     private Double humidityHigh;
+
+    @JsonProperty("ws")
+    private String wifiSsid;
+
+    @JsonProperty("wp")
+    private String wifiPassword;
 }
