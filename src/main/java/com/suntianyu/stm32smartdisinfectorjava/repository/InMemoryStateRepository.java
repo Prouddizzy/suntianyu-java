@@ -118,6 +118,18 @@ public class InMemoryStateRepository {
         DeviceCache cache = getDeviceCache(deviceId);
         synchronized (cache) {
             cache.lastSeenTs = System.currentTimeMillis();
+            cache.online = true;
+        }
+    }
+
+    public void markOffline(String deviceId) {
+        if (!hasText(deviceId)) {
+            return;
+        }
+
+        DeviceCache cache = getDeviceCache(deviceId);
+        synchronized (cache) {
+            cache.online = false;
         }
     }
 
@@ -132,10 +144,12 @@ public class InMemoryStateRepository {
         }
 
         Long lastSeenTs;
+        boolean online;
         synchronized (cache) {
             lastSeenTs = cache.lastSeenTs;
+            online = cache.online;
         }
-        return lastSeenTs != null && System.currentTimeMillis() - lastSeenTs < offlineTimeoutMs;
+        return online && lastSeenTs != null && System.currentTimeMillis() - lastSeenTs < offlineTimeoutMs;
     }
 
     private DeviceCache getDeviceCache(String deviceId) {
@@ -203,6 +217,7 @@ public class InMemoryStateRepository {
         private RuntimeStatus latestStatus;
         private Thresholds config;
         private Long lastSeenTs;
+        private boolean online;
         private final Deque<RuntimeStatus> recentStatuses = new ArrayDeque<>();
     }
 }

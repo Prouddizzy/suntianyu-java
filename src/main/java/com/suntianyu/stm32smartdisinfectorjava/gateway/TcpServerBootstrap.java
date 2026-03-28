@@ -33,6 +33,9 @@ public class TcpServerBootstrap {
     @Value("${app.device.offline-timeout-ms:45000}")
     private long offlineTimeoutMs;
 
+    @Value("${app.device.server-ping-interval-ms:15000}")
+    private long serverPingIntervalMs;
+
     private final DeviceMessageHandler deviceMessageHandler;
 
     private EventLoopGroup bossGroup;
@@ -56,7 +59,12 @@ public class TcpServerBootstrap {
                                 ch.pipeline().addLast(new LineBasedFrameDecoder(1024));
                                 ch.pipeline().addLast(new StringDecoder(StandardCharsets.UTF_8));
                                 ch.pipeline().addLast(new StringEncoder(StandardCharsets.UTF_8));
-                                ch.pipeline().addLast(new IdleStateHandler(offlineTimeoutMs, 0, 0, TimeUnit.MILLISECONDS));
+                                ch.pipeline().addLast(new IdleStateHandler(
+                                        offlineTimeoutMs,
+                                        serverPingIntervalMs,
+                                        0,
+                                        TimeUnit.MILLISECONDS
+                                ));
                                 ch.pipeline().addLast(deviceMessageHandler);
                             }
                         });

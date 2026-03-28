@@ -28,6 +28,8 @@ import java.time.LocalDateTime;
 @RequiredArgsConstructor
 public class DeviceMessageHandler extends SimpleChannelInboundHandler<String> {
 
+    private static final String SERVER_PING_FRAME = "{\"t\":\"ping\"}\n";
+
     private final ObjectMapper objectMapper;
     private final DeviceChannelRegistry channelRegistry;
     private final InMemoryStateRepository stateRepository;
@@ -37,15 +39,17 @@ public class DeviceMessageHandler extends SimpleChannelInboundHandler<String> {
     @Override
     public void channelActive(ChannelHandlerContext ctx) throws Exception {
         log.info("New connection: {}", ctx.channel().remoteAddress());
+        sendPing(ctx, "channel active");
     }
 
     @Override
     public void channelInactive(ChannelHandlerContext ctx) throws Exception {
         log.info("Client disconnected: {}", ctx.channel().remoteAddress());
         RuntimeStatus status = channelRegistry.findDeviceId(ctx.channel())
-                .map(this::loadStatus)
+                .map(this::loadDisconnectedStatus)
                 .orElse(null);
         if (status != null) {
+            stateRepository.markOffline(status.getDeviceId());
             status.setDeviceOnline(false);
             status.setUpdatedAt(LocalDateTime.now());
             stateRepository.saveStatus(status.getDeviceId(), status);
@@ -60,6 +64,11 @@ public class DeviceMessageHandler extends SimpleChannelInboundHandler<String> {
             if (event.state() == IdleState.READER_IDLE) {
                 log.warn("Device idle timeout, closing connection: {}", ctx.channel().remoteAddress());
                 ctx.close();
+                return;
+            }
+            if (event.state() == IdleState.WRITER_IDLE) {
+                sendPing(ctx, "writer idle");
+                return;
             }
         } else {
             super.userEventTriggered(ctx, evt);
@@ -151,6 +160,11 @@ public class DeviceMessageHandler extends SimpleChannelInboundHandler<String> {
     }
 
     private void handleStatusReport(String json, String deviceId) throws JsonProcessingException {
+        if ("unknown".equals(deviceId)) {
+            log.warn("Ignore status report without deviceId: {}", json);
+            return;
+        }
+
         DeviceStatusReport report = objectMapper.readValue(json, DeviceStatusReport.class);
         RuntimeStatus status = loadStatus(deviceId);
 
@@ -192,6 +206,11 @@ public class DeviceMessageHandler extends SimpleChannelInboundHandler<String> {
     }
 
     private void handleEventReport(String json, String deviceId) throws JsonProcessingException {
+        if ("unknown".equals(deviceId)) {
+            log.warn("Ignore event report without deviceId: {}", json);
+            return;
+        }
+
         DeviceEventReport report = objectMapper.readValue(json, DeviceEventReport.class);
         RuntimeStatus status = loadStatus(deviceId);
 
@@ -259,6 +278,31 @@ public class DeviceMessageHandler extends SimpleChannelInboundHandler<String> {
         status.setLastSeenTs(System.currentTimeMillis());
         status.setUpdatedAt(LocalDateTime.now());
         return status;
+    }
+
+    private RuntimeStatus loadDisconnectedStatus(String deviceId) {
+        RuntimeStatus status = stateRepository.getStatus(deviceId);
+        if (status == null) {
+            status = new RuntimeStatus();
+            status.setSelectedMode(DisinfectorMode.SMART);
+            status.setSystemStatus("idle");
+        }
+        status.setDeviceId(deviceId);
+        return status;
+    }
+
+    private void sendPing(ChannelHandlerContext ctx, String reason) {
+        if (ctx == null || !ctx.channel().isActive() || !ctx.channel().isWritable()) {
+            return;
+        }
+
+        ctx.writeAndFlush(SERVER_PING_FRAME).addListener(future -> {
+            if (future.isSuccess()) {
+                log.debug("Sent server ping to {}, reason={}", ctx.channel().remoteAddress(), reason);
+            } else {
+                log.warn("Failed to send server ping to {}, reason={}", ctx.channel().remoteAddress(), reason, future.cause());
+            }
+        });
     }
 
     private void mergeSnapshot(RuntimeStatus status,
